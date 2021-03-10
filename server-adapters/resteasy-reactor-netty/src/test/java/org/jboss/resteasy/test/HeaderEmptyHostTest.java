@@ -14,6 +14,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -62,9 +63,10 @@ public class HeaderEmptyHostTest
             String response = new BufferedReader(new InputStreamReader(client.getInputStream())).lines().collect(Collectors.joining("\n"));
             Assert.assertNotNull(response);
             Assert.assertTrue(response.contains("HTTP/1.1 200 OK"));
-            // TODO I'm not sure that we have to convert this to unknown, but I guess we can verify if all adapters do that..
-            //Assert.assertTrue(response.contains("uriInfo: http://unknown" + uri));
-            Assert.assertTrue(response.contains("uriInfo: " + uri));
+            String uriInfoPattern = ".*uriInfo: http://127.0.0.1" + ":" + TestPortProvider.getPort() + uri + ".*";
+            Assert.assertTrue(
+                    String.format("Expected response '%s' to match pattern '%s'", response, uriInfoPattern),
+                    Pattern.compile(uriInfoPattern, Pattern.DOTALL).matcher(response).matches());
          }
       }
    }
