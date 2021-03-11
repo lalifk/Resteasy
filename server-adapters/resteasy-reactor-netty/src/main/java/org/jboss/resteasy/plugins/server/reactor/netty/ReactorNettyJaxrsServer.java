@@ -138,7 +138,7 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
 
       Publisher<Void> handle(final HttpServerRequest req, final HttpServerResponse resp) {
 
-         final ResteasyUriInfo info = extractUriInfo(req, root, req.scheme());
+         final ResteasyUriInfo info = extractUriInfo(req, root);
 
          // aggregate (and maybe? asInputStream) reads the entire request body into memory (direct?)
          // Can we stream it in some way?
@@ -349,21 +349,20 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
       );
    }
 
-   private ResteasyUriInfo extractUriInfo(HttpServerRequest req, String contextPath, String protocol)
+   private ResteasyUriInfo extractUriInfo(final HttpServerRequest req, final String contextPath)
    {
-      String uri = req.uri();
+      final String uri = req.uri();
 
       String uriString;
 
       // If we appear to have an absolute URL, don't try to recreate it from the host and request line.
-      if (uri.startsWith(protocol + "://")) {
+      if (uri.startsWith(req.scheme() + "://")) {
          uriString = uri;
       } else {
-          uriString = new StringBuilder()
+          uriString = new StringBuilder(100)
                   .append(req.scheme())
                   .append("://")
                   .append(req.hostAddress().getHostString())
-                  //.append(req.hostAddress().getHostName())
                   .append(":").append(req.hostAddress().getPort())
                   .append(req.uri())
                   .toString();
