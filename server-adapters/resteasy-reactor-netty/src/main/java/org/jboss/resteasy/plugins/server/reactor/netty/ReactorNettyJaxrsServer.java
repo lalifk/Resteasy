@@ -22,6 +22,7 @@ import org.jboss.resteasy.util.PortProvider;
 import org.reactivestreams.Publisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import reactor.core.Exceptions;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
 import reactor.netty.DisposableServer;
@@ -36,8 +37,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * A server adapter built on top of <a
@@ -152,6 +155,11 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
          // This is a subscription tied to the completion writing the response.
          final MonoProcessor<Void> completionMono = MonoProcessor.create();
 
+         final AtomicBoolean isTimeoutSet = new AtomicBoolean(false);
+
+         final ReactorNettyHttpResponse resteasyResp =
+                 new ReactorNettyHttpResponse(req.method(), resp, completionMono);
+
          return req.receive()
              .aggregate()
              .asInputStream()
@@ -165,10 +173,8 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
              .flatMap(body -> {
                 log.trace("Body read!");
 
-                // These next 2 classes provide the main '1-way bridges' between reactor-netty and RestEasy.
-                final ReactorNettyHttpResponse resteasyResp =
-                    new ReactorNettyHttpResponse(req.method(), resp, completionMono);
-
+                // These next 2 classes, along with ReactorNettyHttpResponse provide the main '1-way bridges'
+                // between reactor-netty and RestEasy.
                 final SynchronousDispatcher dispatcher = (SynchronousDispatcher) deployment.getDispatcher();
 
                 final ReactorNettyHttpRequest resteasyReq =
@@ -195,8 +201,12 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
                    }
                 }
 
-                final Mono<Void> actualMono =
-                    resteasyReq.timeout() != null ? completionMono.timeout(resteasyReq.timeout()) : completionMono;
+                final Mono<Void> actualMono = Optional.ofNullable(resteasyReq.timeout())
+                        .map(timeout -> {
+                            isTimeoutSet.set(true);
+                            return completionMono.timeout(resteasyReq.timeout());
+                        })
+                        .orElse(completionMono);
 
                 log.trace("Returning completion signal mono from main Flux.");
                 return actualMono
@@ -211,14 +221,19 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
                        log.trace("The completion mono completed with: {}", s);
                     });
              }).onErrorResume(t -> {
-                final Mono<Void> sendMono;
-                if (t instanceof TimeoutException) {
-                   sendMono = resp.status(503).send();
+                if (!resteasyResp.isCommitted()) {
+                    final Mono<Void> sendMono;
+
+                    if (isTimeoutSet.get() && Exceptions.unwrap(t) instanceof TimeoutException) {
+                       sendMono = resp.status(503).send();
+                    } else {
+                       sendMono = resp.status(500).send();
+                    }
+                    sendMono.subscribe(completionMono);
                 } else {
-                   // TODO I see some message like SPI unhandled exception.  What is that about?
-                   sendMono = resp.status(500).sendString(Mono.just(t.getLocalizedMessage())).then();
+                   log.debug("Omitting sending back error response. Response is already committed.");
                 }
-                sendMono.subscribe(completionMono);
+
                 return completionMono;
              })
              .doOnError(err -> log.error("Request processing err.", err))
