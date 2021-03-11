@@ -30,7 +30,7 @@ public class ClientUncheckedErrorTest {
     @BeforeClass
     public static void setup() throws Exception {
         deployment = ReactorNettyContainer.start();
-        Registry registry = deployment.getRegistry();
+        final Registry registry = deployment.getRegistry();
         registry.addPerRequestResource(MyResource.class);
         client = ClientBuilder.newClient();
     }
