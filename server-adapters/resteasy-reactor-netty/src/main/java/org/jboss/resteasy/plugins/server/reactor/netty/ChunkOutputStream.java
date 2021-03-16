@@ -3,11 +3,10 @@ package org.jboss.resteasy.plugins.server.reactor.netty;
 import org.jboss.resteasy.spi.AsyncOutputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import reactor.core.publisher.EmitterProcessor;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.MonoProcessor;
+import reactor.core.publisher.Sinks;
+import reactor.core.publisher.Sinks.EmitFailureHandler;
 import reactor.netty.http.server.HttpServerRequest;
 import reactor.netty.http.server.HttpServerResponse;
 import reactor.util.function.Tuple2;
@@ -33,39 +32,42 @@ public class ChunkOutputStream extends AsyncOutputStream {
 
    private final ReactorNettyHttpResponse parentResponse;
 
-    /**
-     * This is the {@link Mono} that we return from
-     * {@link ReactorNettyJaxrsServer.Handler#handle(HttpServerRequest, HttpServerResponse)}
-     */
-   private final MonoProcessor<Void> completionMono;
+   /**
+    * This is the {@link Mono} that we return from
+    * {@link ReactorNettyJaxrsServer.Handler#handle(HttpServerRequest, HttpServerResponse)}
+    */
+   private final Sinks.Empty<Void> completionSink;
 
-    /**
-     * Indicates that we've starting sending the response bytes.
-     */
-    private volatile boolean started;
+   /**
+    * Indicates that we've starting sending the response bytes.
+    */
+   private volatile boolean started;
 
-    /**
-     * This is ultimately think 'sink' that we write bytes to in {@link #asyncWrite(byte[], int, int)}.
-     */
-    private FluxSink<Tuple2<byte[], CompletableFuture<Void>>> byteSink;
+   /**
+    * This is ultimately think 'sink' that we write bytes to in
+    * {@link #asyncWrite(byte[], int, int)}.
+    */
+   private Sinks.Many<Tuple2<byte[], CompletableFuture<Void>>> byteSink;
 
-    /**
-     * This is used to establish {@link #byteSink} upon the first writing of bytes.
-     */
-   private final Supplier<FluxSink<Tuple2<byte[], CompletableFuture<Void>>>> byteSinkSupplier;
+   /**
+    * This is used to establish {@link #byteSink} upon the first writing of bytes.
+    */
+   private final Supplier<Sinks.Many<Tuple2<byte[], CompletableFuture<Void>>>> byteSinkSupplier;
+
+   private final EmitFailureHandler emitFailureHandler = EmitFailureHandler.FAIL_FAST;
 
    ChunkOutputStream(
        final ReactorNettyHttpResponse parentResponse,
        final HttpServerResponse reactorNettyResponse,
-       final MonoProcessor<Void> completionMono
+       final Sinks.Empty<Void> completionSink
    ) {
        this.parentResponse = Objects.requireNonNull(parentResponse);
-       this.completionMono = Objects.requireNonNull(completionMono);
+       this.completionSink = Objects.requireNonNull(completionSink);
        Objects.requireNonNull(reactorNettyResponse);
        this.byteSinkSupplier = () -> {
            log.trace("Creating FluxSink for output.");
-           final EmitterProcessor<Tuple2<byte[], CompletableFuture<Void>>> bytesEmitter = EmitterProcessor.create();
-           final Flux<byte[]> byteFlux = bytesEmitter.map(tup -> {
+           final Sinks.Many<Tuple2<byte[], CompletableFuture<Void>>> outSink = Sinks.many().multicast().onBackpressureBuffer();
+           final Flux<byte[]> byteFlux = outSink.asFlux().map(tup -> {
                    log.trace("Submitting bytes to downstream");
                    tup.getT2().complete(null);
                    return tup.getT1();
@@ -76,23 +78,30 @@ public class ChunkOutputStream extends AsyncOutputStream {
                        log.trace("Subscription on Flux<byte[]> occurred: {}", s);
                    })
                .doFinally(s -> log.trace("Flux<byte[]> closing with signal: {}", s));
-           reactorNettyResponse.sendByteArray(byteFlux).subscribe(completionMono);
-           return bytesEmitter.sink();
+           Mono.from(reactorNettyResponse.sendByteArray(byteFlux)).subscribe(
+                   v -> {},
+                   e -> completionSink.emitError(e, emitFailureHandler),
+                   completionSink::tryEmitEmpty);
+
+           return outSink;
        };
    }
 
    @Override
    public void write(int b) {
-      byteSink.next(Tuples.of(new byte[] {(byte)b}, new CompletableFuture<>()));
+      byteSink.emitNext(Tuples.of(new byte[] {(byte)b}, new CompletableFuture<>()), emitFailureHandler);
    }
 
    @Override
    public void close() throws IOException {
        log.trace("Closing the ChunkOutputStream.");
        if (!started || byteSink == null) {
-           Mono.<Void>empty().subscribe(completionMono);
+           Mono.<Void>empty().subscribe(
+                   v -> {},
+                   e -> completionSink.emitError(e, emitFailureHandler),
+                   completionSink::tryEmitEmpty);
        } else {
-           byteSink.complete();
+           byteSink.emitComplete(emitFailureHandler);
        }
    }
 
@@ -147,7 +156,7 @@ public class ChunkOutputStream extends AsyncOutputStream {
        return CompletableFuture.completedFuture(null);
    }
 
-    @Override
+   @Override
    public CompletableFuture<Void> asyncWrite(final byte[] bs, int offset, int length) {
         final CompletableFuture<Void> cf = new CompletableFuture<>();
         if (!started) {
@@ -161,7 +170,7 @@ public class ChunkOutputStream extends AsyncOutputStream {
             bytes = Arrays.copyOfRange(bs, offset, offset + length);
         }
         log.trace("Sending bytes to the sink");
-        byteSink.next(Tuples.of(bytes, cf));
+        byteSink.emitNext(Tuples.of(bytes, cf), emitFailureHandler);
         return cf;
    }
 }
