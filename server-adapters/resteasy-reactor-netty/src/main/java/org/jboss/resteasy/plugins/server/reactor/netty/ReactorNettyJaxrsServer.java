@@ -9,7 +9,6 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Consumer;
 import javax.net.ssl.SSLContext;
 import org.jboss.resteasy.core.ResteasyDeploymentImpl;
 import org.jboss.resteasy.core.SynchronousDispatcher;
@@ -36,7 +35,6 @@ import io.netty.handler.timeout.IdleStateHandler;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
-import reactor.core.publisher.Sinks.EmitFailureHandler;
 import reactor.netty.Connection;
 import reactor.netty.DisposableServer;
 import reactor.netty.http.server.HttpServer;
@@ -100,11 +98,8 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
 
       final Handler handler = new Handler();
 
-      HttpServer svrBuilder =
-              Optional.ofNullable(idleTimeout)
-              .map(to -> HttpServer.create()
-                      .doOnConnection(cc -> mkConfigureConnConsumer().accept(cc)))
-              .orElse(HttpServer.create())
+      HttpServer svrBuilder = HttpServer.create()
+              .doOnConnection(this::configure)
               .port(configuredPort)
               .handle(handler::handle);
 
@@ -239,10 +234,8 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
                    } else {
                       sendMono = resp.status(500).send();
                    }
-                   sendMono.subscribe(
-                           v -> {},
-                           e -> completionSink.emitError(e, EmitFailureHandler.FAIL_FAST),
-                           completionSink::tryEmitEmpty);
+                   SinkSubscriber.subscribe(completionSink, sendMono);
+
                 } else {
                    log.debug("Omitting sending back error response. Response is already committed.");
                 }
@@ -362,25 +355,24 @@ public class ReactorNettyJaxrsServer implements EmbeddedJaxrsServer<ReactorNetty
       return this;
    }
 
-   private Consumer<Connection> mkConfigureConnConsumer()
+   private void configure(final Connection conn)
    {
-       return conn -> {
-           final long idleNanos = idleTimeout.toNanos();
-           // TODO, why can't I use reactor-netty methods for this??
-           conn.channel().pipeline().addFirst("idleStateHandler", new IdleStateHandler(0, 0, idleNanos, TimeUnit.NANOSECONDS));
-           conn.channel().pipeline().addAfter("idleStateHandler", "idleEventHandler", new ChannelDuplexHandler() {
-              @Override
-              public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
-                 if (evt instanceof IdleStateEvent) {
-                    IdleStateEvent e = (IdleStateEvent) evt;
-                    if (e.state() == IdleState.ALL_IDLE) {
-                       ctx.close();
-                    }
-                 }
-              }
-           });
-       };
-
+      if (idleTimeout != null) {
+         final long idleNanos = idleTimeout.toNanos();
+         // TODO, why can't I use reactor-netty methods for this??
+         conn.channel().pipeline().addFirst("idleStateHandler", new IdleStateHandler(0, 0, idleNanos, TimeUnit.NANOSECONDS));
+         conn.channel().pipeline().addAfter("idleStateHandler", "idleEventHandler", new ChannelDuplexHandler() {
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+               if (evt instanceof IdleStateEvent) {
+                  IdleStateEvent e = (IdleStateEvent) evt;
+                  if (e.state() == IdleState.ALL_IDLE) {
+                     ctx.close();
+                  }
+               }
+            }
+         });
+       }
    }
 
    private SslContext toNettySSLContext(final SSLContext sslContext)

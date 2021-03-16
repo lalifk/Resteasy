@@ -54,7 +54,7 @@ public class ChunkOutputStream extends AsyncOutputStream {
     */
    private final Supplier<Sinks.Many<Tuple2<byte[], CompletableFuture<Void>>>> byteSinkSupplier;
 
-   private final EmitFailureHandler emitFailureHandler = EmitFailureHandler.FAIL_FAST;
+   private static final EmitFailureHandler EMIT_FAILURE_HANDLER = EmitFailureHandler.FAIL_FAST;
 
    ChunkOutputStream(
        final ReactorNettyHttpResponse parentResponse,
@@ -78,10 +78,8 @@ public class ChunkOutputStream extends AsyncOutputStream {
                        log.trace("Subscription on Flux<byte[]> occurred: {}", s);
                    })
                .doFinally(s -> log.trace("Flux<byte[]> closing with signal: {}", s));
-           Mono.from(reactorNettyResponse.sendByteArray(byteFlux)).subscribe(
-                   v -> {},
-                   e -> completionSink.emitError(e, emitFailureHandler),
-                   completionSink::tryEmitEmpty);
+
+           SinkSubscriber.subscribe(completionSink, Mono.from(reactorNettyResponse.sendByteArray(byteFlux)));
 
            return outSink;
        };
@@ -89,19 +87,16 @@ public class ChunkOutputStream extends AsyncOutputStream {
 
    @Override
    public void write(int b) {
-      byteSink.emitNext(Tuples.of(new byte[] {(byte)b}, new CompletableFuture<>()), emitFailureHandler);
+      byteSink.emitNext(Tuples.of(new byte[] {(byte)b}, new CompletableFuture<>()), EMIT_FAILURE_HANDLER);
    }
 
    @Override
    public void close() throws IOException {
        log.trace("Closing the ChunkOutputStream.");
        if (!started || byteSink == null) {
-           Mono.<Void>empty().subscribe(
-                   v -> {},
-                   e -> completionSink.emitError(e, emitFailureHandler),
-                   completionSink::tryEmitEmpty);
+           SinkSubscriber.subscribe(completionSink, Mono.<Void>empty());
        } else {
-           byteSink.emitComplete(emitFailureHandler);
+           byteSink.emitComplete(EMIT_FAILURE_HANDLER);
        }
    }
 
@@ -170,7 +165,7 @@ public class ChunkOutputStream extends AsyncOutputStream {
             bytes = Arrays.copyOfRange(bs, offset, offset + length);
         }
         log.trace("Sending bytes to the sink");
-        byteSink.emitNext(Tuples.of(bytes, cf), emitFailureHandler);
+        byteSink.emitNext(Tuples.of(bytes, cf), EMIT_FAILURE_HANDLER);
         return cf;
    }
 }
