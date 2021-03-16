@@ -9,7 +9,8 @@ import org.jboss.resteasy.spi.HttpResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.MonoProcessor;
+import reactor.core.publisher.Sinks;
+import reactor.core.publisher.Sinks.EmitFailureHandler;
 import reactor.netty.http.server.HttpServerResponse;
 
 import javax.ws.rs.core.MultivaluedMap;
@@ -34,17 +35,17 @@ public class ReactorNettyHttpResponse implements HttpResponse {
     private final HttpServerResponse resp;
     private OutputStream out;
     private boolean committed;
-    private final MonoProcessor<Void> completionMono;
+    private final Sinks.Empty<Void> completionSink;
 
     public ReactorNettyHttpResponse(
         final HttpMethod method,
         final HttpServerResponse resp,
-        final MonoProcessor<Void> completionMono
+        final Sinks.Empty<Void> completionSink
     ) {
         this.resp = resp;
-        this.completionMono = completionMono;
+        this.completionSink = completionSink;
         if (method == null || !method.equals(HttpMethod.HEAD)) {
-            this.out = new ChunkOutputStream(this, resp, completionMono);
+            this.out = new ChunkOutputStream(this, resp, completionSink);
         } else {
             // Not entirely sure this is the best way to handle this..
             resp.responseHeaders().remove(HttpHeaderNames.TRANSFER_ENCODING);
@@ -237,23 +238,33 @@ public class ReactorNettyHttpResponse implements HttpResponse {
 
     @Override
     public void sendError(int status) {
-        log.trace("Sending error");
-        resp.status(status)
+
+        log.trace("Sending error. Status: {}.", status);
+
+        final Mono<Void> respMono = resp.status(status)
             .header(HttpHeaderNames.CONTENT_LENGTH, HttpHeaderValues.ZERO)
-            .then().subscribe(completionMono);
+            .then();
+
         committed = true;
+        completionSinkSubscribe(respMono);
+        committed();
+
     }
 
     @Override
     public void sendError(int status, String message) {
-        log.trace("Sending error: " + message);
-        resp.status(status)
+
+        log.trace("Sending error. Status: {}. Message: {}", status, message);
+
+        final Mono<Void> respMono = resp.status(status)
             .header(HttpHeaderNames.CONTENT_LENGTH, Integer.toString(message.length()))
             .header(HttpHeaderNames.CONTENT_TYPE, HttpHeaderValues.TEXT_PLAIN)
             .sendString(Mono.just(message))
-            .then()
-            .subscribe(completionMono);
+            .then();
+
+        completionSinkSubscribe(respMono);
         committed();
+
     }
 
     @Override
@@ -281,7 +292,7 @@ public class ReactorNettyHttpResponse implements HttpResponse {
             out.flush();
             out.close();
         } else {
-            Mono.<Void>empty().subscribe(completionMono);
+            completionSinkSubscribe(Mono.<Void>empty());
         }
     }
 
@@ -289,5 +300,17 @@ public class ReactorNettyHttpResponse implements HttpResponse {
     public void flushBuffer() throws IOException {
         log.trace("Flushing response buffer!");
         out.flush();
+    }
+
+    private void completionSinkSubscribe(final Mono<Void> mono) {
+        mono.subscribe(
+            v -> {},
+            e -> completionSink.emitError(e, EmitFailureHandler.FAIL_FAST),
+            /**
+             * Ok not to check return value below because we're inside `subscribe` and the
+             * source is a Publisher<Void>.<br>
+             * See more in https://github.com/reactor/reactor-core/issues/2431
+             */
+             completionSink::tryEmitEmpty);
     }
 }
